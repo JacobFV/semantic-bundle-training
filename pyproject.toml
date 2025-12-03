@@ -1,7 +1,39 @@
 [project]
 name = "semantic-bundle-training"
 version = "0.1.0"
-description = "Add your description here"
+description = "Semantic bundle training experiments - decomposing LLMs into overlapping low-rank subspaces"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "torch>=2.1.0",
+    "transformers>=4.36.0",
+    "datasets>=2.16.0",
+    "accelerate>=0.25.0",
+    "wandb>=0.16.0",
+    "einops>=0.7.0",
+    "scikit-learn>=1.3.0",
+    "numpy>=1.26.0",
+    "tqdm>=4.66.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "ruff>=0.1.0",
+    "ipython>=8.0.0",
+]
+modal = [
+    "modal>=0.56.0",
+]
+
+[project.scripts]
+smoke-test = "src.smoke_test:main"
+train = "src.training:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = ["E501"]
