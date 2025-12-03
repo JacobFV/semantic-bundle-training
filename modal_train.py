@@ -32,7 +32,7 @@ image = (
         "numpy>=1.26.0",
         "tqdm>=4.66.0",
     )
-    .copy_local_dir("src", "/app/src")
+    .add_local_dir("src", "/app/src")
 )
 
 # Volume for saving checkpoints and results
@@ -66,7 +66,6 @@ MODAL_CONFIGS = [
     gpu="A10G",  # A10G for medium models, A100 for 7B+
     timeout=3600 * 4,  # 4 hours
     volumes={"/outputs": volume},
-    secrets=[modal.Secret.from_name("wandb-secret", required=False)],
 )
 def train_single_config(
     model_name: str,

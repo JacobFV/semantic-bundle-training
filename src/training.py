@@ -139,18 +139,28 @@ class Trainer:
             print(f"  - {name}: rank={spec.get_rank(base_model.config.hidden_size)}, "
                   f"sources={spec.gradient_sources}")
 
-        # Wrap with bundles
-        self.model = wrap_model_with_bundles(
-            base_model=base_model,
-            bundle_specs=bundle_specs,
-            alpha_init=self.config.alpha_init,
-            bottleneck_ratio=self.config.bottleneck_ratio,
-            freeze_base=self.config.freeze_base,
-        )
-        self.model = self.model.to(self.device)
+        # Handle baseline (no bundles) vs bundled model
+        if not bundle_specs:
+            # Baseline: use base model directly, don't freeze
+            self.model = base_model.to(self.device)
+            self._is_baseline = True
+            print("Using baseline model (no bundles)")
+        else:
+            # Wrap with bundles
+            self.model = wrap_model_with_bundles(
+                base_model=base_model,
+                bundle_specs=bundle_specs,
+                alpha_init=self.config.alpha_init,
+                bottleneck_ratio=self.config.bottleneck_ratio,
+                freeze_base=self.config.freeze_base,
+            )
+            self.model = self.model.to(self.device)
+            self._is_baseline = False
 
-        print(f"Total parameters: {self.model.num_total_params():,}")
-        print(f"Trainable parameters: {self.model.num_trainable_params():,}")
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
 
         # Setup gradient routing
         self.gradient_router = create_gradient_router(self.model)
@@ -163,8 +173,13 @@ class Trainer:
         )
 
         # Setup optimizer (only trainable params)
+        if self._is_baseline:
+            trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        else:
+            trainable_params = self.model.get_trainable_parameters()
+
         self.optimizer = AdamW(
-            self.model.get_trainable_parameters(),
+            trainable_params,
             lr=self.config.learning_rate,
             weight_decay=self.config.weight_decay,
         )
@@ -262,10 +277,11 @@ class Trainer:
             if accumulated_steps >= self.config.gradient_accumulation_steps:
                 # Clip gradients
                 if self.config.max_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.get_trainable_parameters(),
-                        self.config.max_grad_norm,
-                    )
+                    if self._is_baseline:
+                        params = [p for p in self.model.parameters() if p.requires_grad]
+                    else:
+                        params = self.model.get_trainable_parameters()
+                    torch.nn.utils.clip_grad_norm_(params, self.config.max_grad_norm)
 
                 # Optimizer step
                 self.optimizer.step()
@@ -312,16 +328,17 @@ class Trainer:
             "loss/total": sum(loss_values.values()),
         }
 
-        # Get bundle stats
-        alphas = self.model.get_all_alphas()
-        for layer_idx, layer_alphas in alphas.items():
-            for bundle_name, alpha in layer_alphas.items():
-                log_dict[f"alpha/L{layer_idx}/{bundle_name}"] = alpha
+        # Get bundle stats (only for bundled models)
+        if not self._is_baseline and hasattr(self.model, "get_all_alphas"):
+            alphas = self.model.get_all_alphas()
+            for layer_idx, layer_alphas in alphas.items():
+                for bundle_name, alpha in layer_alphas.items():
+                    log_dict[f"alpha/L{layer_idx}/{bundle_name}"] = alpha
 
-        # Get gradient norms
-        grad_norms = self.model.get_bundle_gradient_norms()
-        for bundle_name, norm in grad_norms.items():
-            log_dict[f"grad_norm/{bundle_name}"] = norm
+            # Get gradient norms
+            grad_norms = self.model.get_bundle_gradient_norms()
+            for bundle_name, norm in grad_norms.items():
+                log_dict[f"grad_norm/{bundle_name}"] = norm
 
         self.train_history.append(log_dict)
 
@@ -335,14 +352,25 @@ class Trainer:
         checkpoint_dir = self.output_dir / checkpoint_name
         checkpoint_dir.mkdir(exist_ok=True)
 
-        # Save bundle weights only (not base model)
-        bundle_state = {
-            "shared_bases": self.model.shared_bases.state_dict(),
-            "bundle_layers": self.model.bundle_layers.state_dict(),
-            "global_step": self.global_step,
-            "config": asdict(self.config),
-        }
-        torch.save(bundle_state, checkpoint_dir / "bundle_weights.pt")
+        if self._is_baseline:
+            # Save full model state for baseline
+            checkpoint_state = {
+                "model_state": self.model.state_dict(),
+                "global_step": self.global_step,
+                "config": asdict(self.config),
+                "is_baseline": True,
+            }
+            torch.save(checkpoint_state, checkpoint_dir / "model_weights.pt")
+        else:
+            # Save bundle weights only (not base model)
+            bundle_state = {
+                "shared_bases": self.model.shared_bases.state_dict(),
+                "bundle_layers": self.model.bundle_layers.state_dict(),
+                "global_step": self.global_step,
+                "config": asdict(self.config),
+                "is_baseline": False,
+            }
+            torch.save(bundle_state, checkpoint_dir / "bundle_weights.pt")
 
         # Save training history
         with open(checkpoint_dir / "train_history.json", "w") as f:
